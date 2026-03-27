@@ -52,6 +52,11 @@ class SimulatorOS:
                 print("  unblock <pid>")
                 print("  ps")
                 print("  mem")
+                print("  mem_detail")
+                print("  mem_policy <first_fit|best_fit|worst_fit>")
+                print("  compact")
+                print("  grow_mem <pid> <pages>")
+                print("  shrink_mem <pid> <pages>")
                 print("  exit")
             elif action == "create_process":
                 # 用法: create_process [name] [priority] [time] [pages]
@@ -112,9 +117,56 @@ class SimulatorOS:
                 print(f"已用页: {status['used_pages']}/{status['total_pages']}")
                 print(f"空闲页: {status['free_pages']}")
                 print(f"使用率: {status['usage_rate']:.2f}%")
+                print(f"分配策略: {status['allocation_policy']}")
                 print(f"位图: {status['bitmap']}")
                 print(f"分配表: {status['allocations'] if status['allocations'] else '<empty>'}")
                 print("====================\n")
+            elif action == "mem_detail":
+                status = self.mm.get_status()
+                print("\n===== 内存详细状态 =====")
+                print(f"已用页: {status['used_pages']}/{status['total_pages']}")
+                print(f"空闲页: {status['free_pages']}")
+                print(f"使用率: {status['usage_rate']:.2f}%")
+                print(f"分配策略: {status['allocation_policy']}")
+                print(f"位图: {status['bitmap']}")
+                print(f"空闲段: {status['free_segments']}")
+                print(f"最大连续空闲块: {status['largest_free_block']} 页")
+                print(f"外部碎片率: {status['external_fragmentation']:.2f}%")
+                print(f"分配表: {status['allocations'] if status['allocations'] else '<empty>'}")
+                print("========================\n")
+            elif action == "mem_policy":
+                if len(cmd) != 2:
+                    print("用法: mem_policy <first_fit|best_fit|worst_fit>")
+                    continue
+                ok = self.mm.set_allocation_policy(cmd[1])
+                print("分配策略已更新" if ok else "分配策略无效")
+            elif action == "compact":
+                ok = self.pm.compact_memory()
+                print("内存紧凑完成" if ok else "内存紧凑失败")
+            elif action == "grow_mem":
+                if len(cmd) != 3:
+                    print("用法: grow_mem <pid> <pages>")
+                    continue
+                try:
+                    pid = int(cmd[1])
+                    pages = int(cmd[2])
+                except ValueError:
+                    print("pid/pages 必须为整数")
+                    continue
+                ok = self.pm.grow_process_memory(pid, pages)
+                print("扩容成功" if ok else "扩容失败")
+            elif action == "shrink_mem":
+                if len(cmd) != 3:
+                    print("用法: shrink_mem <pid> <pages>")
+                    continue
+                try:
+                    pid = int(cmd[1])
+                    pages = int(cmd[2])
+                except ValueError:
+                    print("pid/pages 必须为整数")
+                    continue
+                ok = self.pm.shrink_process_memory(pid, pages)
+                print("缩容成功" if ok else "缩容失败")
             elif action == "exit":
                 self.is_running = False
             else:

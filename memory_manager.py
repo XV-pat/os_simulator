@@ -25,6 +25,15 @@ class MemoryManager:
         self.monitor_thread = threading.Thread(target=self._tracker_thread, daemon=True)
         self.monitor_thread.start()
 
+    def set_allocation_policy(self, policy: str) -> bool:
+        """设置分配策略，支持 first_fit / best_fit / worst_fit。"""
+        normalized = str(policy).strip().lower()
+        if normalized not in {"first_fit", "best_fit", "worst_fit"}:
+            return False
+        with self.lock:
+            self.allocation_policy = normalized
+        return True
+
     def _find_free_segments(self) -> list:
         """返回当前空闲段列表: [(start, length), ...]"""
         segments = []
@@ -65,12 +74,12 @@ class MemoryManager:
             if pid <= 0:
                 return []
 
-            free_pages = [idx for idx, used in enumerate(self.memory_bitmap) if used == 0]
-            if len(free_pages) < pages_needed:
+            segments = self._find_free_segments()
+            total_free_pages = sum(length for _, length in segments)
+            if total_free_pages < pages_needed:
                 return []
 
             selected_pages = []
-            segments = self._find_free_segments()
             chosen_seg = self._choose_segment(segments, pages_needed)
             if chosen_seg:
                 start, _ = chosen_seg
@@ -78,7 +87,13 @@ class MemoryManager:
 
             # 连续段不足时退化为非连续分配，保证可用内存能够被利用。
             if not selected_pages:
-                selected_pages = free_pages[:pages_needed]
+                for seg_start, seg_len in segments:
+                    for page in range(seg_start, seg_start + seg_len):
+                        selected_pages.append(page)
+                        if len(selected_pages) == pages_needed:
+                            break
+                    if len(selected_pages) == pages_needed:
+                        break
 
             for page in selected_pages:
                 self.memory_bitmap[page] = 1
@@ -159,12 +174,48 @@ class MemoryManager:
                 "largest_free_block": largest_free_block,
                 "external_fragmentation": external_fragmentation,
                 "allocations": {pid: pages[:] for pid, pages in self.allocations.items()},
+                "allocation_policy": self.allocation_policy,
+            }
+
+    def compact(self) -> dict:
+        """执行内存紧凑，将已分配页向低地址聚拢，降低外部碎片。"""
+        with self.lock:
+            old_allocations = {pid: pages[:] for pid, pages in self.allocations.items()}
+
+            # 按页号顺序重排，尽量保持每个进程页内相对顺序稳定。
+            ordered = sorted(
+                ((pid, sorted(pages)) for pid, pages in self.allocations.items()),
+                key=lambda item: item[1][0] if item[1] else self.total_pages,
+            )
+
+            cursor = 0
+            new_allocations = {}
+            for pid, pages in ordered:
+                count = len(pages)
+                if count == 0:
+                    continue
+                new_pages = list(range(cursor, cursor + count))
+                new_allocations[pid] = new_pages
+                cursor += count
+
+            self.memory_bitmap = [0] * self.total_pages
+            self.page_owner = [None] * self.total_pages
+            for pid, pages in new_allocations.items():
+                for page in pages:
+                    self.memory_bitmap[page] = 1
+                    self.page_owner[page] = pid
+
+            self.allocations = new_allocations
+            return {
+                "before": old_allocations,
+                "after": {pid: pages[:] for pid, pages in self.allocations.items()},
             }
 
     def _tracker_thread(self):
         """用于跟踪内存分配情况，并且打印内存信息的线程 [cite: 67]"""
         while True:
             time.sleep(self.monitor_interval) # 每 monitor_interval 秒打印一次
+            report_lines = None
             with self.lock:
                 used_pages = sum(self.memory_bitmap)
                 free_pages = self.total_pages - used_pages
@@ -180,14 +231,17 @@ class MemoryManager:
                 if self.print_on_change_only and report_key == self._last_report_key:
                     continue
                 self._last_report_key = report_key
+                allocations_snapshot = {pid: pages[:] for pid, pages in self.allocations.items()}
+                report_lines = [
+                    "\n[Memory Tracker]",
+                    f"使用率: {usage_rate:.2f}% ({used_pages}/{self.total_pages} 页)",
+                    f"空闲页: {free_pages}",
+                    f"位图: {bitmap_str}",
+                    f"最大连续空闲块: {largest_free_block} 页",
+                    f"外部碎片率: {external_fragmentation:.2f}%",
+                    f"分配表: {allocations_snapshot if allocations_snapshot else '<empty>'}",
+                ]
 
-                print("\n[Memory Tracker]")
-                print(f"使用率: {usage_rate:.2f}% ({used_pages}/{self.total_pages} 页)")
-                print(f"空闲页: {free_pages}")
-                print(f"位图: {bitmap_str}")
-                print(f"最大连续空闲块: {largest_free_block} 页")
-                print(f"外部碎片率: {external_fragmentation:.2f}%")
-                if self.allocations:
-                    print(f"分配表: {self.allocations}")
-                else:
-                    print("分配表: <empty>")
+            if report_lines:
+                for line in report_lines:
+                    print(line)

@@ -15,6 +15,9 @@ class ProcessManager:
     def set_memory_manager(self, memory_manager):
         self.memory_manager = memory_manager
 
+    def _get_process(self, pid: int):
+        return self.all_processes.get(pid)
+
     def _pop_from_queue(self, queue: list, pid: int):
         for idx, proc in enumerate(queue):
             if proc.pid == pid:
@@ -79,6 +82,50 @@ class ProcessManager:
                 return False
             target.state = ProcessState.READY
             self.ready_queue.append(target)
+            return True
+
+    def grow_process_memory(self, pid: int, pages: int) -> bool:
+        """为指定进程追加内存页。"""
+        with self.lock:
+            if not self.memory_manager or pages <= 0:
+                return False
+            target = self._get_process(pid)
+            if target is None or target.state == ProcessState.TERMINATED:
+                return False
+            new_pages = self.memory_manager.allocate(pid, pages)
+            if len(new_pages) != pages:
+                return False
+            target.memory_pages.extend(new_pages)
+            return True
+
+    def shrink_process_memory(self, pid: int, pages: int) -> bool:
+        """为指定进程释放部分内存页（从尾部回收）。"""
+        with self.lock:
+            if not self.memory_manager or pages <= 0:
+                return False
+            target = self._get_process(pid)
+            if target is None or target.state == ProcessState.TERMINATED:
+                return False
+            if pages > len(target.memory_pages):
+                return False
+            release_pages = target.memory_pages[-pages:]
+            freed = self.memory_manager.free(pid, release_pages)
+            if freed != pages:
+                return False
+            target.memory_pages = target.memory_pages[:-pages]
+            return True
+
+    def compact_memory(self) -> bool:
+        """触发内存紧凑，并同步刷新所有 PCB 的页索引。"""
+        with self.lock:
+            if not self.memory_manager:
+                return False
+            result = self.memory_manager.compact()
+            after = result.get("after", {})
+            for pid, pcb in self.all_processes.items():
+                if pcb.state == ProcessState.TERMINATED:
+                    continue
+                pcb.memory_pages = after.get(pid, [])[:]
             return True
 
     def _dispatch_next(self):
